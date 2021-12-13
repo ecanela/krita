@@ -70,6 +70,12 @@ PresetHistoryDock::PresetHistoryDock( )
         connect(scroller, SIGNAL(stateChanged(QScroller::State)), this, SLOT(slotScrollerStateChanged(QScroller::State)));
     }
 
+    m_resourceModel = KisResourceServerProvider::instance()->paintOpPresetServer()->resourceModel();
+
+    connect(m_resourceModel, SIGNAL(modelReset()), this, SLOT(updatePresets()));
+    connect(m_resourceModel, SIGNAL(rowsRemoved(const QModelIndex, int, int)), this, SLOT(updatePresets()));
+    connect(m_resourceModel, SIGNAL(dataChanged(const QModelIndex, const QModelIndex, const QVector<int>)), this, SLOT(updatePresets()));
+
     connect(m_presetHistory, SIGNAL(mouseReleased(QListWidgetItem*)), SLOT(presetSelected(QListWidgetItem*)));
     connect(m_sortingModes, SIGNAL(triggered(QAction*)), SLOT(slotSortingModeChanged(QAction*)));
     connect(m_presetHistory, SIGNAL(customContextMenuRequested(QPoint)), SLOT(slotContextMenuRequest(QPoint)));
@@ -93,10 +99,14 @@ void PresetHistoryDock::setCanvas(KoCanvasBase * canvas)
     if (!m_initialized) {
         KisConfig cfg(true);
         QStringList presetHistory = cfg.readEntry<QString>("presethistory", "").split(",", QString::SkipEmptyParts);
-        KisPaintOpPresetResourceServer * rserver = KisResourceServerProvider::instance()->paintOpPresetServer();
+
+
         Q_FOREACH (const QString &p, presetHistory) {
-            KisPaintOpPresetSP preset = rserver->resource("", "", p);
-            addPreset(preset);
+            QModelIndex index = m_resourceModel->indexForResource(m_resourceModel->resourcesForName(p).first());
+            if (index.data(Qt::UserRole + KisAllResourcesModel::Status).toBool()) {
+                KisPaintOpPresetSP preset = m_resourceModel->resourceForIndex(index).dynamicCast<KisPaintOpPreset>();
+                addPreset(preset);
+            }
         }
         int ordering = cfg.readEntry("presethistorySorting", int(DisplayOrder::Static));
         m_sorting = qBound(DisplayOrder::Static, static_cast<DisplayOrder>(ordering), DisplayOrder::Bubbling);
@@ -123,11 +133,11 @@ void PresetHistoryDock::unsetCanvas()
     m_canvas = 0;
     setEnabled(false);
     QStringList presetHistory;
-    for(int i = m_presetHistory->count() -1; i >=0; --i) {
+    for(int i = 0; i < m_presetHistory->count(); i++) {
         QListWidgetItem *item = m_presetHistory->item(i);
-        QVariant v = item->data(BrushPresetRole);
-        KisPaintOpPresetSP preset = v.value<KisPaintOpPresetSP>();
-        presetHistory << preset->name();
+        int id = item->data(ResourceID).toInt();
+        KisPaintOpPresetSP preset = m_resourceModel->resourceForId(id).dynamicCast<KisPaintOpPreset>();
+        presetHistory.insert(0, preset->name());
     }
     KisConfig cfg(false);
     cfg.writeEntry("presethistory", presetHistory.join(","));
@@ -138,8 +148,8 @@ void PresetHistoryDock::presetSelected(QListWidgetItem *item)
     if (item) {
         int oldPosition = m_presetHistory->currentRow();
         updatePresetState(oldPosition);
-        QVariant v = item->data(BrushPresetRole);
-        KisPaintOpPresetSP preset = v.value<KisPaintOpPresetSP>();
+        int id = item->data(ResourceID).toInt();
+        KisPaintOpPresetSP preset = m_resourceModel->resourceForId(id).dynamicCast<KisPaintOpPreset>();
         m_block = true;
         m_canvas->viewManager()->paintOpBox()->resourceSelected(preset);
         m_block = false;
@@ -236,11 +246,11 @@ int PresetHistoryDock::bubblePreset(int position)
 
 void PresetHistoryDock::addPreset(KisPaintOpPresetSP preset)
 {
-    if (preset) {
+    if (preset && !preset->md5Sum().isEmpty()) {
         QListWidgetItem *item = new QListWidgetItem(QPixmap::fromImage(preset->image()), preset->name());
-        QVariant v = QVariant::fromValue<KisPaintOpPresetSP>(preset);
-        item->setData(BrushPresetRole, v);
         item->setData(BubbleMarkerRole, QVariant(false));
+        item->setData(MD5SumRole, preset->md5Sum());
+        item->setData(ResourceID, preset->resourceId());
         m_presetHistory->insertItem(0, item);
         m_presetHistory->setCurrentRow(0);
         if (m_presetHistory->count() > 10) {
@@ -248,6 +258,21 @@ void PresetHistoryDock::addPreset(KisPaintOpPresetSP preset)
         }
     }
 
+}
+
+void PresetHistoryDock::updatePresets()
+{
+    for (int i = 0; i < m_presetHistory->count(); ++i) {
+        QListWidgetItem *item = m_presetHistory->item(i);
+        int id = item->data(ResourceID).toInt();
+        QModelIndex index = m_resourceModel->indexForResourceId(id);
+        if (index.isValid()) {
+            item->setIcon(QPixmap::fromImage(index.data(Qt::UserRole + KisAbstractResourceModel::Thumbnail).value<QImage>()));
+            item->setText(index.data(Qt::UserRole + KisAbstractResourceModel::Name).toString());
+        } else {
+            delete m_presetHistory->takeItem(i);
+        }
+    }
 }
 
 void PresetHistoryDock::slotContextMenuRequest(const QPoint &pos)
